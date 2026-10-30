@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: viso-pro-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: VISO_ENVIRONMENT
+        value: production
+      - key: VISO_CORS_ORIGINS
+        value: https://viso-pro.vercel.app
+      - key: VISO_DATABASE_URL
+        sync: false
+      - key: VISO_AUTH_TOKEN_SECRET
+        generateValue: true

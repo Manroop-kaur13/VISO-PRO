@@ -1,0 +1,17 @@
+# Local Python environments and caches
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.phase2_test_deps/
+**/.phase2-tmp/
+**/.venv-check/
+
+# Local secrets/configuration; keep the checked-in template
+.env
+.env.*
+!.env.example
+
+# Local coverage output
+**/.coverage
+**/htmlcov/
