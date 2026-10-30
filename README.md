@@ -165,7 +165,7 @@ domain, add that exact origin to VISO_CORS_ORIGINS in the backend environment.
 
 1. Push the repository to the Git provider connected to Render.
 2. In Render, create a Blueprint from the repository root. render.yaml sets
-   the service root to backend.
+   the service root to backend and the web service plan to Free.
 3. During setup, provide:
    - VISO_DATABASE_URL: PostgreSQL URL for the app role, not the database
      owner URL.
