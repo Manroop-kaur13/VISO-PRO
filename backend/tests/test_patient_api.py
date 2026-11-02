@@ -131,18 +131,27 @@ def test_upload_rejects_unapproved_file_types(client: TestClient) -> None:
 def test_upload_download_and_delete_use_private_storage(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from app.storage import s3
+    from app import storage
 
-    monkeypatch.setenv("VISO_S3_BUCKET", "synthetic-test-bucket")
+    monkeypatch.setenv("VISO_STORAGE_PROVIDER", "cloudinary")
+    monkeypatch.setenv("CLOUDINARY_CLOUD_NAME", "synthetic-cloud")
+    monkeypatch.setenv("CLOUDINARY_API_KEY", "synthetic-key")
+    monkeypatch.setenv("CLOUDINARY_API_SECRET", "synthetic-secret")
     get_settings.cache_clear()
     uploaded: dict[str, bytes] = {}
-    monkeypatch.setattr(s3, "put_object", lambda key, data, content_type: uploaded.update({key: data}))
+
+    def put_object(key: str, data: bytes, content_type: str) -> str:
+        stored_key = f"cloudinary:{key}"
+        uploaded[stored_key] = data
+        return stored_key
+
+    monkeypatch.setattr(storage, "put_object", put_object)
     monkeypatch.setattr(
-        s3,
+        storage,
         "signed_download_url",
-        lambda key, as_attachment=False: f"https://storage.invalid/{key}",
+        lambda key, as_attachment=False: f"https://secure-storage.invalid/{key}",
     )
-    monkeypatch.setattr(s3, "delete_object", lambda key: uploaded.pop(key, None))
+    monkeypatch.setattr(storage, "delete_object", lambda key: uploaded.pop(key, None))
 
     headers = _register(client, "capture@example.com")
     created = client.post(
@@ -165,12 +174,16 @@ def test_upload_download_and_delete_use_private_storage(
     )
     assert response.status_code == 201
     image_id = response.json()["image_id"]
-    assert response.json()["image_url"].startswith("https://storage.invalid/")
+    assert response.json()["image_url"].startswith("https://secure-storage.invalid/")
     assert len(uploaded) == 1
 
     listed = client.get("/api/patients/SYN-IMG/captures", headers=headers)
     assert listed.status_code == 200
     assert len(listed.json()) == 1
+    assert listed.json()[0]["image_id"] == image_id
+    assert listed.json()[0]["content_type"] == "image/png"
+    assert listed.json()[0]["size_bytes"] == len(bytes([137, 80, 78, 71, 13, 10, 26, 10]) + b"synthetic")
+    assert listed.json()[0]["image_url"].startswith("https://secure-storage.invalid/")
 
     download = client.get(
         f"/api/patients/SYN-IMG/captures/{image_id}/download",
@@ -178,7 +191,7 @@ def test_upload_download_and_delete_use_private_storage(
         follow_redirects=False,
     )
     assert download.status_code == 200
-    assert download.json()["url"].startswith("https://storage.invalid/")
+    assert download.json()["url"].startswith("https://secure-storage.invalid/")
 
     deleted = client.delete(
         f"/api/patients/SYN-IMG/captures/{image_id}", headers=headers
@@ -187,3 +200,41 @@ def test_upload_download_and_delete_use_private_storage(
     assert uploaded == {}
     assert client.get("/api/patients/SYN-IMG/captures", headers=headers).json() == []
     get_settings.cache_clear()
+
+
+def test_capture_routes_keep_patient_authorization(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import storage
+
+    monkeypatch.setenv("CLOUDINARY_CLOUD_NAME", "synthetic-cloud")
+    monkeypatch.setenv("CLOUDINARY_API_KEY", "synthetic-key")
+    monkeypatch.setenv("CLOUDINARY_API_SECRET", "synthetic-secret")
+    get_settings.cache_clear()
+    monkeypatch.setattr(storage, "put_object", lambda key, data, content_type: f"cloudinary:{key}")
+    monkeypatch.setattr(storage, "signed_download_url", lambda key, as_attachment=False: "https://signed.invalid/asset")
+    owner = _register(client, "owner@example.com")
+    patient = client.post(
+        "/api/patients",
+        headers=owner,
+        json={"patient_id": "SYN-PRIVATE", "patient_name": "Synthetic Patient"},
+    )
+    assert patient.status_code == 201
+    uploaded = client.post(
+        "/api/patients/SYN-PRIVATE/captures",
+        headers=owner,
+        data={"client_capture_id": "private-capture"},
+        files={"file": ("capture.png", bytes([137, 80, 78, 71, 13, 10, 26, 10]) + b"synthetic", "image/png")},
+    )
+    assert uploaded.status_code == 201
+    image_id = uploaded.json()["image_id"]
+    other = _register(client, "other@example.com")
+    assert client.get("/api/patients/SYN-PRIVATE/captures", headers=other).status_code == 404
+    assert client.get(
+        f"/api/patients/SYN-PRIVATE/captures/{image_id}/download", headers=other
+    ).status_code == 404
+    assert client.delete(
+        f"/api/patients/SYN-PRIVATE/captures/{image_id}", headers=other
+    ).status_code == 404
+    assert client.get("/api/patients/SYN-PRIVATE/captures").status_code == 401
+    assert client.delete(
+        f"/api/patients/SYN-PRIVATE/captures/{image_id}"
+    ).status_code == 401

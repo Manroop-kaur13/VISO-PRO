@@ -16,3 +16,11 @@ services:
         sync: false
       - key: VISO_AUTH_TOKEN_SECRET
         generateValue: true
+      - key: VISO_STORAGE_PROVIDER
+        value: cloudinary
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false

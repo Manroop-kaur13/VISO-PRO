@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     database_url: str | None = None
     auth_token_secret: SecretStr | None = None
     auth_token_ttl_minutes: int = Field(default=30, ge=5, le=1440)
+    storage_provider: str = "cloudinary"
+    cloudinary_cloud_name: str | None = Field(default=None, validation_alias="CLOUDINARY_CLOUD_NAME")
+    cloudinary_api_key: str | None = Field(default=None, validation_alias="CLOUDINARY_API_KEY")
+    cloudinary_api_secret: SecretStr | None = Field(default=None, validation_alias="CLOUDINARY_API_SECRET")
     s3_bucket: str | None = None
     s3_region: str = "us-east-1"
     s3_endpoint_url: str | None = None

@@ -1,10 +1,8 @@
 """Protected patient, imaging-session, capture and annotation APIs."""
 
 from datetime import datetime, timezone
-from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -14,7 +12,6 @@ from app.api.routes.auth import get_current_user
 from app.db.models import (
     Annotation,
     ImagingSession,
-    LegacyCapture,
     Patient,
     PatientAccess,
     PatientProfile,
@@ -34,7 +31,7 @@ from app.schemas.patients import (
     SessionResponse,
     UploadCaptureResponse,
 )
-from app.storage import s3
+from app import storage
 
 router = APIRouter(prefix="/api", tags=["patients and imaging"])
 IMAGE_LIMIT_BYTES = 15 * 1024 * 1024
@@ -90,26 +87,10 @@ def _new_session(patient: Patient, user: User, db: Session) -> ImagingSession:
     return imaging_session
 
 
-def _legacy_capture_response(asset: LegacyCapture, patient_id: str) -> CaptureResponse | None:
-    url = urlsplit(asset.image_url)
-    if url.scheme != "https" or not url.netloc:
-        return None
-    return CaptureResponse(
-        id=asset.capture_id,
-        image_id=asset.capture_id,
-        patient_id=patient_id,
-        image_url=asset.image_url,
-        created_at=asset.captured_at,
-        kind="video" if asset.capture_kind == "video" else "image",
-        content_type=asset.media_type,
-        size_bytes=0,
-        deletable=False,
-    )
-
 def _stored_capture_response(asset: StoredCapture, patient_id: str) -> CaptureResponse:
     try:
-        url = s3.signed_download_url(asset.storage_key)
-    except (BotoCoreError, ClientError, RuntimeError) as exc:
+        url = storage.signed_download_url(asset.storage_key)
+    except storage.StorageError as exc:
         raise HTTPException(status_code=503, detail="Image storage is unavailable.") from exc
     return CaptureResponse(
         id=asset.capture_id,
@@ -130,16 +111,9 @@ def _all_capture_responses(patient: Patient, user: User, db: Session) -> list[Ca
         .where(StoredCapture.patient_id == patient.patient_id, StoredCapture.owner_id == user.id)
         .order_by(StoredCapture.captured_at.desc())
     ).all()
-    legacy = db.scalars(
-        select(LegacyCapture)
-        .where(LegacyCapture.patient_id == patient.patient_id)
-        .order_by(LegacyCapture.captured_at.desc())
-    ).all()
+    # Legacy URL-only rows remain in PostgreSQL but are excluded because they
+    # carry no verifiable private-delivery metadata.
     results = [_stored_capture_response(item, patient.patient_id) for item in stored]
-    results.extend(
-        capture for item in legacy
-        if (capture := _legacy_capture_response(item, patient.patient_id)) is not None
-    )
     return sorted(results, key=lambda item: item.created_at, reverse=True)
 
 
@@ -330,7 +304,7 @@ def upload_capture(
         raise HTTPException(status_code=413, detail="Uploaded file exceeds the allowed size.")
     if not _content_matches_type(contents, detected_type):
         raise HTTPException(status_code=415, detail="File content does not match its declared type.")
-    if not s3.storage_is_configured():
+    if not storage.storage_is_configured():
         raise HTTPException(status_code=503, detail="Image storage is not configured.")
 
     imaging_session = _get_session(session_id, patient, user, db) if session_id else _new_session(patient, user, db)
@@ -338,14 +312,14 @@ def upload_capture(
     object_key = f"records/{imaging_session.id}/{capture_id}.{extension}"
     now = datetime.now(timezone.utc)
     try:
-        s3.put_object(object_key, contents, detected_type)
+        storage_key = storage.put_object(object_key, contents, detected_type)
         asset = StoredCapture(
             capture_id=capture_id,
             client_capture_id=client_capture_id,
             session_id=imaging_session.id,
             patient_id=patient.patient_id,
             owner_id=user.id,
-            storage_key=object_key,
+            storage_key=storage_key,
             content_type=detected_type,
             original_name=f"capture_{capture_id}.{extension}",
             size_bytes=len(contents),
@@ -356,25 +330,21 @@ def upload_capture(
         db.add(asset)
         db.commit()
         db.refresh(asset)
-    except (BotoCoreError, ClientError) as exc:
+    except storage.StorageError as exc:
         db.rollback()
-        try:
-            s3.delete_object(object_key)
-        except (BotoCoreError, ClientError):
-            pass
         raise HTTPException(status_code=503, detail="Image storage is unavailable.") from exc
     except IntegrityError as exc:
         db.rollback()
         try:
-            s3.delete_object(object_key)
-        except (BotoCoreError, ClientError):
+            storage.delete_object(storage_key)
+        except storage.StorageError:
             pass
         raise HTTPException(status_code=409, detail="Capture ID is already in use.") from exc
     except Exception:
         db.rollback()
         try:
-            s3.delete_object(object_key)
-        except (BotoCoreError, ClientError):
+            storage.delete_object(storage_key)
+        except storage.StorageError:
             pass
         raise
     response = _stored_capture_response(asset, patient.patient_id)
@@ -407,18 +377,12 @@ def download_capture(
         )
     )
     if asset is None:
-        legacy = db.scalar(
-            select(LegacyCapture).where(
-                LegacyCapture.capture_id == image_id,
-                LegacyCapture.patient_id == patient.patient_id,
-            )
-        )
-        if legacy is None or urlsplit(legacy.image_url).scheme != "https":
-            raise HTTPException(status_code=404, detail="Capture not found.")
-        return DownloadResponse(url=legacy.image_url)
+        # Legacy URL-only rows cannot be proven private, so they are intentionally
+        # not downloadable through this endpoint.
+        raise HTTPException(status_code=404, detail="Capture not found.")
     try:
-        url = s3.signed_download_url(asset.storage_key, as_attachment=True)
-    except (BotoCoreError, ClientError, RuntimeError) as exc:
+        url = storage.signed_download_url(asset.storage_key, as_attachment=True)
+    except storage.StorageError as exc:
         raise HTTPException(status_code=503, detail="Image storage is unavailable.") from exc
     return DownloadResponse(url=url)
 
@@ -440,10 +404,10 @@ def delete_capture(
     )
     if asset is None:
         raise HTTPException(status_code=404, detail="Capture not found.")
-    object_key = asset.storage_key
+    storage_key = asset.storage_key
     try:
-        s3.delete_object(object_key)
-    except (BotoCoreError, ClientError) as exc:
+        storage.delete_object(storage_key)
+    except storage.StorageError as exc:
         raise HTTPException(status_code=503, detail="Image storage is unavailable; the capture record was retained.") from exc
     db.delete(asset)
     db.commit()

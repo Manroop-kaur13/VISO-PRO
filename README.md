@@ -10,8 +10,9 @@ production; secrets stay on the backend.
 - Protected patient list/create, profile, imaging sessions, annotation, and
   capture endpoints.
 - PostgreSQL persistence through SQLAlchemy and Alembic.
-- Private S3-compatible object storage for uploaded images/video, with metadata
-  in PostgreSQL and short-lived signed retrieval links.
+- Private Cloudinary storage for new image/video uploads, with metadata in
+  PostgreSQL and five-minute signed retrieval links. Existing S3 records remain
+  readable through the retained S3 adapter.
 - /health, /ready, and interactive API documentation at /docs.
 - Browser authentication uses a short-lived bearer token kept in
   sessionStorage. Patient and capture APIs require a valid token.
@@ -60,47 +61,26 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 Put that output into VISO_AUTH_TOKEN_SECRET. It must be at least 32 characters.
 Do not use the sample placeholder in a running service.
 
-Image storage is optional for the current deployment. Without S3-compatible
-storage configured, sign-in and database-backed patient/profile features work,
-but image uploads are unavailable and /ready reports object_storage as
-not_configured. Add S3-compatible storage later when ready.
+Image storage is optional. Without Cloudinary credentials, authentication and
+database-backed patient/profile features work, but image uploads are disabled
+and `/ready` reports object storage as `not_configured`.
 
-When you are ready to enable image uploads, create a private Amazon S3 bucket
-(or another S3-compatible bucket) and give the backend access to only that
-bucket. In AWS, keep Block Public Access enabled and ACLs disabled. Do not use
-root-account access keys.
+To enable Cloudinary locally, set `CLOUDINARY_CLOUD_NAME`,
+`CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` in `backend/.env`, and set
+`VISO_STORAGE_PROVIDER=cloudinary`. New media is uploaded with Cloudinary's
+`authenticated` delivery type. The API returns time-limited signed retrieval
+URLs after checking the clinician's access to the patient. Keep credentials
+only in the backend environment; never put them in frontend files or Git.
 
-For an AWS IAM policy attached to the backend's IAM user, replace
-YOUR_BUCKET_NAME with the bucket name and use:
+The S3 adapter and `VISO_S3_*` settings remain available for rollback and for
+previous S3-backed records. To direct new uploads to S3 again, set
+`VISO_STORAGE_PROVIDER=s3` and provide the S3 settings. Stored records are
+provider-tagged, so previously uploaded Cloudinary assets remain routable when
+the provider setting changes.
 
-~~~
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": "s3:ListBucket",
-      "Resource": "arn:aws:s3:::YOUR_BUCKET_NAME"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-      "Resource": "arn:aws:s3:::YOUR_BUCKET_NAME/*"
-    }
-  ]
-}
-~~~
-
-Create a dedicated IAM user for the backend, attach that policy, and create an
-access key for an application running outside AWS. Put the access key only in
-backend/.env locally and in Render's environment settings for deployment.
-Configure VISO_S3_BUCKET, VISO_S3_REGION, VISO_S3_ACCESS_KEY_ID, and
-VISO_S3_SECRET_ACCESS_KEY. Leave VISO_S3_ENDPOINT_URL blank for AWS S3; set it
-to the provider's S3 API endpoint for another S3-compatible service. Never put
-storage credentials in code/outputs/config.js or send them in chat.
-
-Restart the API after setting storage values. GET /ready should report
-object_storage as ready only after the backend can reach the bucket.
+`/ready` distinguishes missing storage configuration from an unavailable
+provider: credentials alone do not mark storage ready. The backend must also
+successfully ping Cloudinary (or reach the configured S3 bucket).
 
 #### AWS Academy Learner Lab note
 
@@ -170,8 +150,9 @@ domain, add that exact origin to VISO_CORS_ORIGINS in the backend environment.
    - VISO_DATABASE_URL: PostgreSQL URL for the app role, not the database
      owner URL.
    - Render generates VISO_AUTH_TOKEN_SECRET automatically.
-   - S3 settings are intentionally omitted for now; image uploads remain
-     unavailable until storage is configured.
+   - Set `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and
+     `CLOUDINARY_API_SECRET` in the Render service environment.
+   - `VISO_STORAGE_PROVIDER=cloudinary` is set by `render.yaml`.
 4. Deploy and verify https://<your-render-service>/health. /ready will return
    HTTP 503 with object_storage not_configured until storage is configured.
 5. Update code/outputs/config.js if the actual service URL differs, then
@@ -219,6 +200,6 @@ documentation.
 
 ## External setup still required
 
-- A private object-storage bucket and backend access credentials/role must be
-  configured.
+- Cloudinary credentials must be configured on the Render backend to enable
+  uploads. No frontend credentials are used.
 - Render and Vercel need to be deployed and connected to the correct API URL.

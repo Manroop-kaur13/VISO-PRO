@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from app.config import get_settings
 from app.db.session import database_is_reachable
-from app.storage.s3 import storage_is_ready
+from app import storage
 
 router = APIRouter(tags=["system"])
 
@@ -18,7 +18,7 @@ class HealthResponse(BaseModel):
 
 class ReadinessResponse(BaseModel):
     status: Literal["ready", "not_ready"]
-    checks: dict[str, Literal["ready", "not_configured", "unavailable"]]
+    checks: dict[str, Literal["ready", "configured", "not_configured", "unavailable"]]
 
 
 @router.get(
@@ -47,15 +47,16 @@ def readiness_check(response: Response) -> ReadinessResponse:
         database_status = "ready"
     else:
         database_status = "unavailable"
-    if not settings.s3_bucket:
+    if not storage.storage_is_configured():
+        storage_configuration = "not_configured"
         storage_status = "not_configured"
-    elif storage_is_ready():
-        storage_status = "ready"
     else:
-        storage_status = "unavailable"
+        storage_configuration = "configured"
+        storage_status = "ready" if storage.storage_is_ready() else "unavailable"
     checks = {
         "api": "ready",
         "database": database_status,
+        "object_storage_configuration": storage_configuration,
         "object_storage": storage_status,
     }
     ready = all(value == "ready" for value in checks.values())
