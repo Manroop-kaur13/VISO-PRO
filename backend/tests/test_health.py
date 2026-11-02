@@ -1,5 +1,7 @@
+from fastapi import Response
 from fastapi.testclient import TestClient
 
+from app.api.routes.health import readiness_check
 from app.config import Settings
 from app.main import app
 
@@ -44,6 +46,32 @@ def test_readiness_distinguishes_cloudinary_configuration_from_connectivity(monk
     assert response.status_code == 503
     assert response.json()["checks"]["object_storage_configuration"] == "configured"
     assert response.json()["checks"]["object_storage"] == "unavailable"
+
+
+def test_readiness_is_ready_when_all_services_are_ready_and_storage_is_configured(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.api.routes.health.get_settings",
+        lambda: Settings(
+            database_url="postgresql+psycopg://user:pass@localhost/db",
+            cloudinary_cloud_name="cloud",
+            cloudinary_api_key="key",
+        ),
+    )
+    monkeypatch.setattr("app.api.routes.health.database_is_reachable", lambda: True)
+    monkeypatch.setattr("app.api.routes.health.storage.storage_is_configured", lambda: True)
+    monkeypatch.setattr("app.api.routes.health.storage.storage_is_ready", lambda: True)
+
+    response = Response()
+    result = readiness_check(response)
+
+    assert response.status_code == 200
+    assert result.status == "ready"
+    assert result.checks == {
+        "api": "ready",
+        "database": "ready",
+        "object_storage_configuration": "configured",
+        "object_storage": "ready",
+    }
 
 
 def test_cors_allows_the_deployed_frontend_origin() -> None:

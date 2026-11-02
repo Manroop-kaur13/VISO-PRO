@@ -59,7 +59,9 @@ def readiness_check(response: Response) -> ReadinessResponse:
         "object_storage_configuration": storage_configuration,
         "object_storage": storage_status,
     }
-    ready = all(value == "ready" for value in checks.values())
+    # Configuration is reported separately for diagnostics; only service
+    # readiness checks determine whether the API can serve requests.
+    ready = all(checks[name] == "ready" for name in ("api", "database", "object_storage"))
     response.status_code = 200 if ready else 503
 
     return ReadinessResponse(
